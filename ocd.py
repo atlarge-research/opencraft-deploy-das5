@@ -328,6 +328,12 @@ class Minecraft(Instance):
                                 wd=self.wd, debug=True,
                                 mode=RunMode.FORGET)
 
+    def wait(self):
+        while pid_exists(self.node, self.pid):
+            time.sleep(5.0)
+        while pid_exists(self.node, self.jmx):
+            time.sleep(5.0)
+
     def stop(self):
         kill(self.node, self.pid)
         kill(self.node, self.jmx)
