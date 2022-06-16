@@ -95,6 +95,32 @@ def run_remotely(node: str, command: Command, wd=None, debug=False, mode: RunMod
             raise RuntimeError(f"Runmode '{mode}' does not exist.")
 
 
+def reserve(config) -> int:
+    """
+    Reserve a number of nodes on DAS5.
+
+    :param config: Dictionary of experiment-configuration.toml
+    :return: Reservation number.
+    """
+    numnodes = 1 + max([max(dlist) for dlist in config["deployment"].values()])
+    duration = config["iterationDuration"] if "iterationDuration" in config else 900
+    output = subprocess.check_output(["preserve", "-np", str(numnodes), "-t", str(duration)]).strip().decode()
+    reservation_number = int(output.split("\n")[0].split()[-1][:-1])
+    return reservation_number
+
+
+def cancel_reservation(reservation: int) -> bool:
+    """
+    Cancel a reservation on DAS5, allowing other users to use the nodes.
+
+    :param reservation: Reservation number.
+    :return: True if reservation was successfully cancelled.
+    """
+    output = subprocess.check_output(["preserve", "-c", str(reservation)]).strip().decode()
+    output_parts = output.split()
+    return len(output_parts) > 0 and output_parts[-1] == "cancelled"
+
+
 def get_reservation(reservation: int) -> List[str]:
     llist = subprocess.check_output(["preserve", "-llist"]).strip().decode()
     for line in llist.split('\n'):
@@ -125,6 +151,39 @@ def wait_for_reservation_ready(reservation: int) -> None:
         else:
             print(f"Waiting for reservation to become ready. Currently ({datetime.now()}): {reservation_status}")
             time.sleep(5)
+
+
+def pid_exists(node: str, pid: str) -> bool:
+    """
+    Checks if the given process ID exists on the given node.
+
+    :param node: Hostname of node to connect to.
+    :param pid: Process ID.
+    :return: True iff the given hostname has a process with the given process ID.
+    """
+    exists = run_remotely(node, Command(f"kill -0 {pid} || echo nope"), mode=RunMode.OUTPUT) != "nope"
+    return exists
+
+
+def wait(node: str, pid: str, timeout=10.0) -> bool:
+    """
+    Waits for the process with PID pid to stop on the given node. Returns true iff the process has stopped.
+
+    :param node: The node on which to stop a process.
+    :param pid: The pid of the process.
+    :param timeout: Timeout in seconds.
+    :return: True if process has stopped. False otherwise.
+    """
+    remaining_timeout = timeout
+    while remaining_timeout > 0:
+        exists = pid_exists(node, pid)
+        if exists:
+            sleep_time = min(1.0, remaining_timeout)
+            remaining_timeout -= sleep_time
+            time.sleep(sleep_time)
+        else:
+            return True
+    return False
 
 
 def kill(node: str, pid: str) -> None:
@@ -168,18 +227,47 @@ class Instance(ABC):
 
     @abstractmethod
     def setup(self):
+        """
+        Performs program setup, such as copying required files to their correct locations.
+
+        :return: None.
+        """
         pass
 
     @abstractmethod
     def start(self):
+        """
+        Starts the program.
+
+        :return: None.
+        """
+        pass
+
+    @abstractmethod
+    def wait(self):
+        """
+        Waits until the program has exited (i.e., is no longer running).
+
+        :return: None.
+        """
         pass
 
     @abstractmethod
     def stop(self):
+        """
+        Stops the running program.
+
+        :return: None.
+        """
         pass
 
     @abstractmethod
     def clean(self):
+        """
+        Removes temporary files, and moves persistent files to their correct place for storage and analysis.
+
+        :return: None.
+        """
         pass
 
 
@@ -289,12 +377,28 @@ class Opencraft(Instance):
         assert os.path.isdir(opencraft_config)
         run_remotely(self.node, Command(f"cp -r {opencraft_config} {self.opencraft_wd}"), debug=True)
 
+        # Find and copy the world folder. Causes the given world to be loaded by the game during the experiment.
+        opencraft_world = find_resource(self.path, "world", file=False, root_path=self.root_path)
+        if opencraft_world is not None:
+            run_remotely(self.node, Command(
+                f"mkdir {os.path.join(self.opencraft_wd, 'worlds')} && cp -r {opencraft_world} {os.path.join(self.opencraft_wd, 'worlds', 'world')}"),
+                         debug=True)
+
     def start(self):
         environment = [("AWS_ACCESS_KEY_ID", os.environ["AWS_ACCESS_KEY_ID"]),
                        ("AWS_SECRET_ACCESS_KEY", os.environ["AWS_SECRET_ACCESS_KEY"])]
         self.pid = run_remotely(self.node, Command(f"java {' '.join(self.jvm_args)} -jar {self.executable}"),
                                 wd=self.opencraft_wd, debug=True,
                                 mode=RunMode.FORGET, env=environment)
+
+    def wait(self):
+        """
+        Method blocks until Opencraft has exited.
+
+        :return: None
+        """
+        while pid_exists(self.node, self.pid):
+            time.sleep(5.0)
 
     def stop(self):
         kill(self.node, self.pid)
@@ -349,8 +453,21 @@ class Yardstick(Instance):
                                    wd=self.yardstick_wd,
                                    debug=True, mode=RunMode.THREAD)
 
-    def stop(self):
+    def wait(self):
+        """
+        Blocks until Yardstick has exited.
+
+        :return: None.
+        """
         self.thread.join()
+
+    def stop(self):
+        """
+        Kills any running Yardstick processes.
+
+        :return: None.
+        """
+        run_remotely(self.node, Command(f"killall java || true"))
 
     def clean(self):
         run_remotely(self.node, Command(
@@ -381,6 +498,10 @@ class Pecosa(Instance):
         self.pid = run_remotely(self.node, Command(f"python {self.executable} {self.log_file} {self.opencraft_pid}"),
                                 mode=RunMode.FORGET)
 
+    def wait(self):
+        while pid_exists(self.node, self.pid):
+            time.sleep(5.0)
+
     def stop(self):
         kill(self.node, self.pid)
 
@@ -399,7 +520,11 @@ def run_experiment(path: str, reservation: int, **kwargs) -> None:
 
     for entry in os.listdir(path):
         if entry not in _SPECIAL_DIRS and os.path.isdir(os.path.join(path, entry)):
-            run_configuration(reservation, os.path.join(path, entry), exp_group_path)
+            try:
+                run_configuration(reservation, os.path.join(path, entry), exp_group_path)
+            except (InterruptedError, KeyboardInterrupt):
+                print("Gracefully stopped experiments.")
+                break
 
 
 def run_configuration(reservation: int, configuration_path: str, root_path: str):
@@ -411,7 +536,21 @@ def run_configuration(reservation: int, configuration_path: str, root_path: str)
     assert type(num_iterations) is int
     for i in range(num_iterations):
         iteration_path = os.path.join(configuration_path, str(i))
-        run_iteration(reservation, iteration_path, root_path, i)
+        if os.path.isdir(iteration_path):
+            print(f"Results for iteration {i} already exist at {iteration_path}. Skipping...")
+            continue
+        if reservation is None:
+            iteration_reservation = reserve(config)
+        else:
+            iteration_reservation = reservation
+        try:
+            run_iteration(iteration_reservation, iteration_path, root_path, i)
+        except (InterruptedError, KeyboardInterrupt):
+            print(f"Experiment interrupted. Trying to exit gracefully...")
+            raise
+        finally:
+            if reservation is None:
+                cancel_reservation(iteration_reservation)
 
 
 def run_iteration(reservation: int, path: str, root_path: str, iteration: int) -> None:
@@ -419,9 +558,6 @@ def run_iteration(reservation: int, path: str, root_path: str, iteration: int) -
     nodes = get_nodes(reservation)
     if len(nodes) <= 0:
         print(f"Reservation {reservation} not found. Skipping...")
-        return
-    if os.path.isdir(path):
-        print(f"Results for iteration {iteration} already exist at {path}. Skipping...")
         return
     else:
         os.mkdir(path)
@@ -499,33 +635,34 @@ def _run_iteration(iteration, game_node, yardstick_nodes, game_jvm_args, yardsti
     :return: None
     """
     game = game_from_name(game_name, game_node, path, root_path, iteration, game_jvm_args)
-    game.setup()
-    game.start()
-
-    # Add delay for server to start before yardstick/pecosa connection
-    time.sleep(30)
     pecosa = Pecosa(game_node, path, root_path, iteration, game.pid)
-    pecosa.setup()
-    pecosa.start()
-
-    yardstick_nodes = yardstick_nodes[1:]
     yardstick_instances = []
-    for node in yardstick_nodes:
-        yardstick = Yardstick(node, path, root_path, iteration, yardstick_jvm_args, game.node)
-        yardstick.setup()
-        yardstick_instances.append(yardstick)
-    for yi in yardstick_instances:
-        yi.start()
-    for yi in yardstick_instances:
-        # TODO change call to signal that Yardstick.stop simply waits.
-        yi.stop()
-
-    pecosa.stop()
-    game.stop()
-    pecosa.clean()
-    game.clean()
-    for yi in yardstick_instances:
-        yi.clean()
+    try:
+        game.setup()
+        game.start()
+        # Add delay for server to start before yardstick/pecosa connection
+        time.sleep(30)
+        pecosa.setup()
+        pecosa.start()
+        for node in yardstick_nodes:
+            yardstick = Yardstick(node, path, root_path, iteration, yardstick_jvm_args, game.node)
+            yardstick.setup()
+            yardstick_instances.append(yardstick)
+        for yi in yardstick_instances:
+            yi.start()
+        for yi in yardstick_instances:
+            yi.wait()
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    finally:
+        for yi in yardstick_instances:
+            yi.stop()
+        pecosa.stop()
+        game.stop()
+        pecosa.clean()
+        game.clean()
+        for yi in yardstick_instances:
+            yi.clean()
 
 
 def collect_results(path: str, **kwargs):
@@ -633,7 +770,7 @@ if __name__ == '__main__':
 
     run = sp.add_parser("run")
     run.add_argument("path", help="path to experiment")
-    run.add_argument("reservation", help="hostnames of nodes to use for experiment")
+    run.add_argument("reservation", nargs="?", default=None, help="hostnames of nodes to use for experiment")
     run.set_defaults(func=run_experiment)
 
     collect = sp.add_parser("collect")
