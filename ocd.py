@@ -770,7 +770,7 @@ if __name__ == '__main__':
 
     run = sp.add_parser("run")
     run.add_argument("path", help="path to experiment")
-    run.add_argument("reservation", nargs="?", default=None, help="hostnames of nodes to use for experiment")
+    run.add_argument("reservation", nargs="?", default=None, help="reservation number of DAS5 nodes")
     run.set_defaults(func=run_experiment)
 
     collect = sp.add_parser("collect")
