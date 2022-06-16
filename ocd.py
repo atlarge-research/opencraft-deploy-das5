@@ -92,6 +92,12 @@ def run_remotely(node: str, command: Command, wd=None, debug=False, mode: RunMod
 
 
 def reserve(config) -> int:
+    """
+    Reserve a number of nodes on DAS5.
+
+    :param config: Dictionary of experiment-configuration.toml
+    :return: Reservation number.
+    """
     numnodes = 1 + max([max(dlist) for dlist in config["deployment"].values()])
     duration = config["iterationDuration"] if "iterationDuration" in config else 900
     output = subprocess.check_output(["preserve", "-np", str(numnodes), "-t", str(duration)]).strip().decode()
@@ -100,6 +106,12 @@ def reserve(config) -> int:
 
 
 def cancel_reservation(reservation: int) -> bool:
+    """
+    Cancel a reservation on DAS5, allowing other users to use the nodes.
+
+    :param reservation: Reservation number.
+    :return: True if reservation was successfully cancelled.
+    """
     output = subprocess.check_output(["preserve", "-c", str(reservation)]).strip().decode()
     output_parts = output.split()
     return len(output_parts) > 0 and output_parts[-1] == "cancelled"
@@ -138,6 +150,13 @@ def wait_for_reservation_ready(reservation: int) -> None:
 
 
 def pid_exists(node: str, pid: str) -> bool:
+    """
+    Checks if the given process ID exists on the given node.
+
+    :param node: Hostname of node to connect to.
+    :param pid: Process ID.
+    :return: True iff the given hostname has a process with the given process ID.
+    """
     exists = run_remotely(node, Command(f"kill -0 {pid} || echo nope"), mode=RunMode.OUTPUT) != "nope"
     return exists
 
@@ -204,22 +223,47 @@ class Instance(ABC):
 
     @abstractmethod
     def setup(self):
+        """
+        Performs program setup, such as copying required files to their correct locations.
+
+        :return: None.
+        """
         pass
 
     @abstractmethod
     def start(self):
+        """
+        Starts the program.
+
+        :return: None.
+        """
         pass
 
     @abstractmethod
     def wait(self):
+        """
+        Waits until the program has exited (i.e., is no longer running).
+
+        :return: None.
+        """
         pass
 
     @abstractmethod
     def stop(self):
+        """
+        Stops the running program.
+
+        :return: None.
+        """
         pass
 
     @abstractmethod
     def clean(self):
+        """
+        Removes temporary files, and moves persistent files to their correct place for storage and analysis.
+
+        :return: None.
+        """
         pass
 
 
@@ -244,6 +288,7 @@ class Opencraft(Instance):
         assert os.path.isdir(opencraft_config)
         run_remotely(self.node, Command(f"cp -r {opencraft_config} {self.opencraft_wd}"), debug=True)
 
+        # Find and copy the world folder. Causes the given world to be loaded by the game during the experiment.
         opencraft_world = find_resource(self.path, "world", file=False, root_path=self.root_path)
         if opencraft_world is not None:
             run_remotely(self.node, Command(
@@ -256,6 +301,11 @@ class Opencraft(Instance):
                                 mode=RunMode.FORGET)
 
     def wait(self):
+        """
+        Method blocks until Opencraft has exited.
+
+        :return: None
+        """
         while pid_exists(self.node, self.pid):
             time.sleep(5.0)
 
@@ -312,9 +362,19 @@ class Yardstick(Instance):
                                    debug=True, mode=RunMode.THREAD)
 
     def wait(self):
+        """
+        Blocks until Yardstick has exited.
+
+        :return: None.
+        """
         self.thread.join()
 
     def stop(self):
+        """
+        Kills any running Yardstick processes.
+
+        :return: None.
+        """
         run_remotely(self.node, Command(f"killall java || true"))
 
     def clean(self):
