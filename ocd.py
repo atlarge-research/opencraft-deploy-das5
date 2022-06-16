@@ -462,7 +462,7 @@ def _run_iteration(iteration, game_node, yardstick_nodes, game_jvm_args, yardsti
     yardstick_nodes = yardstick_nodes[1:]
     yardstick_instances = []
     for node in yardstick_nodes:
-        yardstick = Yardstick(node, path, root_path, iteration, yardstick_jvm_args, vanilla.node)
+        yardstick = Yardstick(node, path, root_path, iteration, yardstick_jvm_args, game.node)
         yardstick.setup()
         yardstick_instances.append(yardstick)
     for yi in yardstick_instances:
