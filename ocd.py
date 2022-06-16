@@ -432,6 +432,13 @@ def run_iteration(reservation: int, path: str, root_path: str, iteration: int) -
 
 def _run_iteration(iteration, opencraft_node, yardstick_nodes, opencraft_jvm_args, yardstick_jvm_args, path, root_path):
     opencraft = Opencraft(opencraft_node, path, root_path, iteration, opencraft_jvm_args)
+    opencraft.setup()
+    opencraft.start()
+    # Add delay for server to start before yardstick/pecosa connection
+    time.sleep(30)
+    pecosa = Pecosa(opencraft_node, path, root_path, iteration, opencraft.pid)
+    pecosa.setup()
+    pecosa.start()
     yardstick_instances = []
     try:
         opencraft.setup()
