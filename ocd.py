@@ -183,9 +183,21 @@ class Instance(ABC):
         pass
 
 
-class Vanilla(Instance):
+class Minecraft(Instance):
+    """
+    Minecraft game instance.
+    """
 
     def __init__(self, node: str, iteration_path: str, root_path: str, iteration: int, jvm_args: List[str]):
+        """
+        Creates a Minecraft game instance. Requires server.jar and jmxClient.jar to run!
+
+        :param node: Hostname of machine that will run the game.
+        :param iteration_path: Path to store program output such as logs.
+        :param root_path: Finding resources up to here. Part of shared NFS.
+        :param iteration: Current iteration number. Used to create a directory for program output.
+        :param jvm_args: JVM args passed to the game.
+        """
         super().__init__(node, iteration_path, root_path, iteration)
         self.jvm_args = jvm_args
         self.executable = None
@@ -245,8 +257,20 @@ class Vanilla(Instance):
 
 
 class Opencraft(Instance):
+    """
+    Opencraft game instance. Requires opencraft*.jar and config directory to run!
+    """
 
     def __init__(self, node: str, iteration_path: str, root_path: str, iteration: int, jvm_args: List[str]):
+        """
+        Create an Opencraft game instance.
+
+        :param node: Hostname of the machine where the game should run.
+        :param iteration_path: Location to store program output such as logs. Part of shared NFS.
+        :param root_path: Finding resources up to here. Part of shared NFS.
+        :param iteration: Current iteration number. Used to create output directory for log files, etc.
+        :param jvm_args: JVM args passed to the game.
+        """
         super().__init__(node, iteration_path, root_path, iteration)
         self.jvm_args = jvm_args
         self.executable = None
@@ -439,16 +463,41 @@ def run_iteration(reservation: int, path: str, root_path: str, iteration: int) -
 
 
 def game_from_name(name, node, path, root_path, iteration, jvm_args):
+    """
+    Creates a game instances from the given name.
+
+    :param name: Name of the game. Supported names: opencraft, minecraft.
+    :param node: Hostname of the machine that should run the game.
+    :param path: Current path. Start location to look for resources. Part of shared NFS.
+    :param root_path: Root path. Finding resources up to here. Part of shared NFS.
+    :param iteration: Current iteration number. Used to create a directory in which to run the game.
+    :param jvm_args: JVM args passed to the game.
+    :return: Game instance.
+    """
     if name == "opencraft":
         return Opencraft(node, path, root_path, iteration, jvm_args)
     elif name == "minecraft":
-        return Vanilla(node, path, root_path, iteration, jvm_args)
+        return Minecraft(node, path, root_path, iteration, jvm_args)
     else:
         raise RuntimeError(f"ocd does not support game with name {name}")
 
 
 def _run_iteration(iteration, game_node, yardstick_nodes, game_jvm_args, yardstick_jvm_args, path, root_path,
                    game_name):
+    """
+    Runs one iteration of an experiment without further configuration. Accessing configuration files should happen
+    outside of this function.
+
+    :param iteration: Current iteration number. Used to create a directory in which to run the game.
+    :param game_node: Hostname of the machine that should run the game.
+    :param yardstick_nodes: Hostnames of the machines that should run Yardstick player emulation.
+    :param game_jvm_args: JVM args passed to the game.
+    :param yardstick_jvm_args: JVM args passed to Yardstick player emulation.
+    :param path: Current path. Start location to look for resources. Part of shared NFS.
+    :param root_path: Root path. Finding resources up to here. Part of shared NFS.
+    :param game_name: Name of the game. Used to create game instance.
+    :return: None
+    """
     game = game_from_name(game_name, game_node, path, root_path, iteration, game_jvm_args)
     game.setup()
     game.start()
@@ -480,6 +529,14 @@ def _run_iteration(iteration, game_node, yardstick_nodes, game_jvm_args, yardsti
 
 
 def collect_results(path: str, **kwargs):
+    """
+    Collects results for an experiment. Manually run between experiment completion and data analysis.
+    Merges data across iterations into single files.
+
+    :param path: Experiment path.
+    :param kwargs: Not used.
+    :return: None
+    """
     collect_results_for_prefix(path, file_prefix="pecosa")
     collect_results_for_prefix(path, file_prefix="opencraft-events")
     collect_results_for_prefix(path, file_prefix="dyconits")
