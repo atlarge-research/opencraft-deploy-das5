@@ -434,7 +434,7 @@ def run_iteration(reservation: int, path: str, root_path: str, iteration: int) -
     opencraft_node = nodes[0]
     yardstick_nodes = [node for node in nodes if nodes.index(node) in config["deployment"]["yardstick"]]
 
-    _run_iteration(iteration, opencraft_node, yardstick_nodes, opencraft_jvm_args, yardstick_jvm_args, path, root_path,
+    _run_iteration(iteration, opencraft_node, yardstick_nodes, game_jvm_args, yardstick_jvm_args, path, root_path,
                    game_name)
 
 
