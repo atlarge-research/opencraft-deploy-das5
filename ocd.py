@@ -42,8 +42,12 @@ class Command(object):
     def __init__(self, command: str):
         self.command = command
 
-    def build(self, address, wd=None, nohup=False, output: Output = Output.NULL, debug=False) -> List[str]:
+    def build(self, address, wd=None, nohup=False, output: Output = Output.NULL, debug=False, env=[]) -> List[str]:
         full_command = ["ssh", address]
+
+        for (env, val) in env:
+            full_command += ["export", f"{env}={val}", ";"]
+
         if wd is not None:
             full_command += ["cd", wd, ";"]
         if nohup:
@@ -65,7 +69,7 @@ class Command(object):
         return full_command
 
 
-def run_remotely(node: str, command: Command, wd=None, debug=False, mode: RunMode = RunMode.OUTPUT):
+def run_remotely(node: str, command: Command, wd=None, debug=False, mode: RunMode = RunMode.OUTPUT, env=[]):
     if mode == mode.OUTPUT:
         output = Output.STRING
     elif debug:
@@ -74,10 +78,10 @@ def run_remotely(node: str, command: Command, wd=None, debug=False, mode: RunMod
         output = Output.NULL
 
     if mode == mode.FORGET:
-        full_command = command.build(node, output=output, wd=wd, debug=debug, nohup=True)
+        full_command = command.build(node, output=output, wd=wd, debug=debug, nohup=True, env=env)
         return subprocess.check_output(full_command).strip().decode()
     else:
-        full_command = command.build(node, output=output, wd=wd, debug=debug, nohup=False)
+        full_command = command.build(node, output=output, wd=wd, debug=debug, nohup=False, env=env)
         if mode == mode.OUTPUT:
             return subprocess.check_output(full_command).strip().decode()
         elif mode == mode.VOID:
@@ -267,9 +271,100 @@ class Instance(ABC):
         pass
 
 
-class Opencraft(Instance):
+class Minecraft(Instance):
+    """
+    Minecraft game instance.
+    """
 
     def __init__(self, node: str, iteration_path: str, root_path: str, iteration: int, jvm_args: List[str]):
+        """
+        Creates a Minecraft game instance. Requires server.jar and jmxClient.jar to run!
+
+        :param node: Hostname of machine that will run the game.
+        :param iteration_path: Path to store program output such as logs.
+        :param root_path: Finding resources up to here. Part of shared NFS.
+        :param iteration: Current iteration number. Used to create a directory for program output.
+        :param jvm_args: JVM args passed to the game.
+        """
+        super().__init__(node, iteration_path, root_path, iteration)
+        self.jvm_args = jvm_args
+        self.executable = None
+        self.jmx_executable = None
+        self.pid = None
+        self.jmx = None
+        self.wd = None
+
+    def setup(self):
+        # TODO make a function for this, with the required checks.
+        vanilla = find_resource(self.path, "server.jar",
+                                root_path=self.root_path)
+        assert vanilla is not None
+        self.executable = vanilla
+
+        jmx_exec = find_resource(self.path, "jmxClient.jar",
+                                 root_path=self.root_path)
+        assert jmx_exec is not None
+        self.jmx_executable = jmx_exec
+
+        self.wd = run_remotely(self.node, Command(f"mktemp -d"), mode=RunMode.OUTPUT)
+
+        vanilla_config = find_resource(self.path, "server.properties", root_path=self.root_path)
+        run_remotely(self.node, Command(f"cp {vanilla_config} {self.wd}"), debug=True)
+
+        world = find_resource(self.path, "world-opencraft", file=False, root_path=self.root_path)
+        run_remotely(self.node, Command(f"cp -r {world} {self.wd}"), debug=True)
+
+        eula = find_resource(self.path, "eula.txt", root_path=self.root_path)
+        run_remotely(self.node, Command(f"cp {eula} {self.wd}"), debug=True)
+
+    def start(self):
+        self.pid = run_remotely(self.node, Command(
+            f"java {' '.join(self.jvm_args)} -jar {self.executable} --world {self.wd}/world-opencraft"),
+                                wd=self.wd, debug=True,
+                                mode=RunMode.FORGET)
+        time.sleep(10)
+        self.jmx = run_remotely(self.node, Command(
+            f"java -jar {self.jmx_executable} \"127.0.0.1\" \"25564\" \"{self.wd}\" \"630000\""),
+                                wd=self.wd, debug=True,
+                                mode=RunMode.FORGET)
+
+    def wait(self):
+        while pid_exists(self.node, self.pid):
+            time.sleep(5.0)
+        while pid_exists(self.node, self.jmx):
+            time.sleep(5.0)
+
+    def stop(self):
+        kill(self.node, self.pid)
+        kill(self.node, self.jmx)
+
+    def clean(self):
+        jmx_log = os.path.join(self.wd, 'tick_log.csv')
+        jmx_log_dst = os.path.join(self.path, f"tick_log.{self.node}.csv")
+        run_remotely(self.node, Command(f"[ ! -f {jmx_log} ] || mv {jmx_log} {jmx_log_dst}"))
+
+        node_log = os.path.join(self.wd, f'{self.node}.log')
+        node_log_dst = os.path.join(self.path, f'{self.node}')
+        run_remotely(self.node, Command(f"[ ! -f {node_log} ] || mv {node_log} {node_log_dst}"))
+
+        run_remotely(self.node, Command(f"rm -rf {self.wd}"))
+
+
+class Opencraft(Instance):
+    """
+    Opencraft game instance. Requires opencraft*.jar and config directory to run!
+    """
+
+    def __init__(self, node: str, iteration_path: str, root_path: str, iteration: int, jvm_args: List[str]):
+        """
+        Create an Opencraft game instance.
+
+        :param node: Hostname of the machine where the game should run.
+        :param iteration_path: Location to store program output such as logs. Part of shared NFS.
+        :param root_path: Finding resources up to here. Part of shared NFS.
+        :param iteration: Current iteration number. Used to create output directory for log files, etc.
+        :param jvm_args: JVM args passed to the game.
+        """
         super().__init__(node, iteration_path, root_path, iteration)
         self.jvm_args = jvm_args
         self.executable = None
@@ -296,9 +391,11 @@ class Opencraft(Instance):
                          debug=True)
 
     def start(self):
+        environment = [("AWS_ACCESS_KEY_ID", os.environ["AWS_ACCESS_KEY_ID"]),
+                       ("AWS_SECRET_ACCESS_KEY", os.environ["AWS_SECRET_ACCESS_KEY"])]
         self.pid = run_remotely(self.node, Command(f"java {' '.join(self.jvm_args)} -jar {self.executable}"),
                                 wd=self.opencraft_wd, debug=True,
-                                mode=RunMode.FORGET)
+                                mode=RunMode.FORGET, env=environment)
 
     def wait(self):
         """
@@ -321,6 +418,7 @@ class Opencraft(Instance):
         run_remotely(self.node, Command(f"[ ! -f {player_log} ] || mv {player_log} {player_log_dst}"))
         run_remotely(self.node, Command(
             f"mv {os.path.join(self.opencraft_wd, self.node + '.log')} {os.path.join(self.path, 'opencraft.' + self.node + '.log')}"))
+        run_remotely(self.node, Command(f"mv {os.path.join(self.opencraft_wd, 'worlds')} {self.path}"))
         run_remotely(self.node, Command(f"rm -rf {self.opencraft_wd}"))
 
 
@@ -475,39 +573,85 @@ def run_iteration(reservation: int, path: str, root_path: str, iteration: int) -
     config = toml.load(config_path)
     assert max(config["deployment"]["yardstick"]) < len(nodes)
     # TODO support opencraft world folder, through extra resources dir
+    game_jvm_args = []
     try:
-        opencraft_jvm_args = config["opencraft"]["jvm"]
+        game_jvm_args += config["game"]["jvm"]
     except KeyError:
-        opencraft_jvm_args = []
+        pass
+
+    try:
+        game_jvm_args += config["opencraft"]["jvm"]
+    except KeyError:
+        pass
+
     try:
         yardstick_jvm_args = config["yardstick"]["jvm"]
     except KeyError:
         yardstick_jvm_args = []
 
+    try:
+        game_config_path = find_resource(path, "game.toml", root_path=root_path)
+        assert os.path.isfile(game_config_path)
+        game_config = toml.load(game_config_path)
+        game_name = game_config["name"]
+    except KeyError:
+        game_name = "opencraft"
+
     opencraft_node = nodes[0]
     yardstick_nodes = [node for node in nodes if nodes.index(node) in config["deployment"]["yardstick"]]
 
-    _run_iteration(iteration, opencraft_node, yardstick_nodes, opencraft_jvm_args, yardstick_jvm_args, path, root_path)
+    _run_iteration(iteration, opencraft_node, yardstick_nodes, game_jvm_args, yardstick_jvm_args, path, root_path,
+                   game_name)
 
 
-def _run_iteration(iteration, opencraft_node, yardstick_nodes, opencraft_jvm_args, yardstick_jvm_args, path, root_path):
-    opencraft = Opencraft(opencraft_node, path, root_path, iteration, opencraft_jvm_args)
-    opencraft.setup()
-    opencraft.start()
-    # Add delay for server to start before yardstick/pecosa connection
-    time.sleep(30)
-    pecosa = Pecosa(opencraft_node, path, root_path, iteration, opencraft.pid)
-    pecosa.setup()
-    pecosa.start()
+def game_from_name(name, node, path, root_path, iteration, jvm_args):
+    """
+    Creates a game instances from the given name.
+
+    :param name: Name of the game. Supported names: opencraft, minecraft.
+    :param node: Hostname of the machine that should run the game.
+    :param path: Current path. Start location to look for resources. Part of shared NFS.
+    :param root_path: Root path. Finding resources up to here. Part of shared NFS.
+    :param iteration: Current iteration number. Used to create a directory in which to run the game.
+    :param jvm_args: JVM args passed to the game.
+    :return: Game instance.
+    """
+    if name == "opencraft":
+        return Opencraft(node, path, root_path, iteration, jvm_args)
+    elif name == "minecraft":
+        return Minecraft(node, path, root_path, iteration, jvm_args)
+    else:
+        raise RuntimeError(f"ocd does not support game with name {name}")
+
+
+def _run_iteration(iteration, game_node, yardstick_nodes, game_jvm_args, yardstick_jvm_args, path, root_path,
+                   game_name):
+    """
+    Runs one iteration of an experiment without further configuration. Accessing configuration files should happen
+    outside of this function.
+
+    :param iteration: Current iteration number. Used to create a directory in which to run the game.
+    :param game_node: Hostname of the machine that should run the game.
+    :param yardstick_nodes: Hostnames of the machines that should run Yardstick player emulation.
+    :param game_jvm_args: JVM args passed to the game.
+    :param yardstick_jvm_args: JVM args passed to Yardstick player emulation.
+    :param path: Current path. Start location to look for resources. Part of shared NFS.
+    :param root_path: Root path. Finding resources up to here. Part of shared NFS.
+    :param game_name: Name of the game. Used to create game instance.
+    :return: None
+    """
+    game = game_from_name(game_name, game_node, path, root_path, iteration, game_jvm_args)
+    pecosa = Pecosa(game_node, path, root_path, iteration, game.pid)
     yardstick_instances = []
     try:
-        opencraft.setup()
-        opencraft.start()
-        pecosa = Pecosa(opencraft_node, path, root_path, iteration, opencraft.pid)
+        game.setup()
+        game.start()
+        # Add delay for server to start before yardstick/pecosa connection
+        time.sleep(30)
         pecosa.setup()
         pecosa.start()
         for node in yardstick_nodes:
-            yardstick = Yardstick(node, path, root_path, iteration, yardstick_jvm_args, opencraft.node)
+            yardstick = Yardstick(node, path, root_path, iteration, yardstick_jvm_args, game.node)
             yardstick.setup()
             yardstick_instances.append(yardstick)
         for yi in yardstick_instances:
@@ -520,14 +664,22 @@ def _run_iteration(iteration, opencraft_node, yardstick_nodes, opencraft_jvm_arg
         for yi in yardstick_instances:
             yi.stop()
         pecosa.stop()
-        opencraft.stop()
+        game.stop()
         pecosa.clean()
-        opencraft.clean()
+        game.clean()
         for yi in yardstick_instances:
             yi.clean()
 
 
 def collect_results(path: str, **kwargs):
+    """
+    Collects results for an experiment. Manually run between experiment completion and data analysis.
+    Merges data across iterations into single files.
+
+    :param path: Experiment path.
+    :param kwargs: Not used.
+    :return: None
+    """
     collect_results_for_prefix(path, file_prefix="pecosa")
     collect_results_for_prefix(path, file_prefix="opencraft-events")
     collect_results_for_prefix(path, file_prefix="dyconits")
@@ -624,7 +776,7 @@ if __name__ == '__main__':
 
     run = sp.add_parser("run")
     run.add_argument("path", help="path to experiment")
-    run.add_argument("reservation", nargs="?", default=None, help="hostnames of nodes to use for experiment")
+    run.add_argument("reservation", nargs="?", default=None, help="reservation number of DAS5 nodes")
     run.set_defaults(func=run_experiment)
 
     collect = sp.add_parser("collect")
